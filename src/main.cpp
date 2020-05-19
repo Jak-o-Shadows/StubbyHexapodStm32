@@ -13,6 +13,8 @@ extern "C"
 #include "i2c/i2cMaster.h"
 
 #include "pca9685/pca9685.h"
+
+#include "servo4017/servo4017.h"
 }
 
 #include <stdint.h>
@@ -140,6 +142,15 @@ void doResetLegs()
 	}
 }
 
+// 4017 servo driver things
+static uint8_t servoIndexStart_4017 = 16; // The first servo that the 4017's control
+static servo4017_t servo4017Device = {
+	41.6666,
+	60,
+	0,
+	{0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
 // ----------Microcontroller things--------
 static void clock_setup(void)
 {
@@ -184,6 +195,8 @@ static void nvic_setup(void)
 	// Without this the RTC interrupt routine will never be called.
 	nvic_enable_irq(NVIC_USART2_IRQ);
 	nvic_set_priority(NVIC_USART2_IRQ, 2);
+
+	nvic_set_priority(NVIC_TIM3_IRQ, 0);
 }
 
 static void gpio_setup(void)
@@ -243,12 +256,14 @@ int main(void)
 
 	clock_setup();
 	gpio_setup();
-	timer_setup();
+	//timer_setup();
 	usart_setup();
-	i2cMaster_setup(I2C2);
+	//i2cMaster_setup(I2C2);
 	nvic_setup();
 
-	pca965_setup(I2C2, 0x80);
+	//pca965_setup(I2C2, 0x80);
+
+	servo4017_setup(&servo4017Device);
 
 	// Manually centre the legs
 	for (int i = 0; i < NUMSERVOS; i++)
@@ -597,6 +612,8 @@ void usart2_isr(void)
 
 void tim2_isr(void)
 {
+	// This timer is used to update the servo position from the in-memory position.
+
 	// This timer ticks every 1ms
 	if (timer_get_flag(TIM2, TIM_SR_CC1IF))
 	{
@@ -619,16 +636,52 @@ void tim2_isr(void)
 			// Set servo position if different
 			for (uint8_t servoIdx = 0; servoIdx < NUMSERVOS; servoIdx++)
 			{
-				if (servoIdx < 16)
+
+				// Currently only support 16 sevos - easier to just make it work this way rather than modifying the demand code
+				if (_cmdpos[servoIdx] != cmdpos[servoIdx])
 				{
-					// Currently only support 16 sevos - easier to just make it work this way rather than modifying the demand code
-					if (_cmdpos[servoIdx] != cmdpos[servoIdx])
+					_cmdpos[servoIdx] = cmdpos[servoIdx];
+					if (servoIdx < 16)
 					{
-						_cmdpos[servoIdx] = cmdpos[servoIdx];
-						pca9685_setServoPos(I2C2, 0x80, servoIdx, _cmdpos[servoIdx]);
+						//pca9685_setServoPos(I2C2, 0x80, servoIdx, _cmdpos[servoIdx]);
+					}
+					else
+					{
+						//timerCompareValue_4017[servoIdx - servoIndexStart_4017] = cmdpos[servoIdx];
 					}
 				}
 			}
 		}
+	}
+}
+
+void tim3_isr(void)
+{
+	static uint8_t idxA; // how far through the 8 servos the 4017 TIM3_CH1 controls is
+
+	if (timer_get_flag(TIM3, TIM_SR_CC1IF))
+	{														 // from compare1?
+		timer_set_oc_mode(TIM3, TIM_OC1, TIM_OCM_FORCE_LOW); //     as per OC1M page 329
+		timer_set_oc_mode(TIM3, TIM_OC1, TIM_OCM_ACTIVE);	 //     as per OC1M page 329
+
+		//TIM3_CCR1 += 10000; //timerCompareValue_4017[0 * 8 + idxA];
+		uint16_t compare_time = timer_get_counter(TIM3);
+		timer_set_oc_value(TIM3, TIM_OC1, servo4017Device.pulseLengths_ticks[0 * 8 + idxA] + compare_time);
+
+		//gpio_toggle(GPIOA, GPIO5);
+
+		if (idxA == 8)
+		{ // do 4017 reset
+			gpio_set(GPIOA, GPIO5);
+			__asm__("nop");
+			__asm__("nop");
+			gpio_clear(GPIOA, GPIO5);
+		}
+		if (++idxA == 9)
+		{
+			idxA = 0;
+		}
+
+		timer_clear_flag(TIM3, TIM_SR_CC1IF);
 	}
 }
