@@ -15,6 +15,9 @@ extern "C"
 #include "pca9685/pca9685.h"
 
 #include "servo4017/servo4017.h"
+
+#include "serialServo/serialServo.h"
+
 }
 
 #include <stdint.h>
@@ -45,7 +48,7 @@ typedef enum servoFlags_e
 } servoFlags_t;
 
 // Config
-#define NUMSERVOS 18
+#define NUMSERVOS 19
 #define IDOFF 0
 
 const uint8_t SERVOADDRESSES[] = {0 + IDOFF,
@@ -64,7 +67,9 @@ const uint8_t SERVOADDRESSES[] = {0 + IDOFF,
 								  13 + IDOFF,
 								  14 + IDOFF,
 								  15 + IDOFF,
-								  16 + IDOFF};
+								  16 + IDOFF,
+								  17 + IDOFF,
+								  18 + IDOFF};
 
 #define Version 5
 
@@ -79,7 +84,7 @@ static uint16_t cmdpos[NUMSERVOS];
 static uint16_t _cmdpos[NUMSERVOS];
 static uint8_t listen[NUMSERVOS];
 
-static uint16_t updatePeriod_ms = 30;
+static uint16_t updatePeriod_ms = 1000;
 static uint16_t updateCounter_ms = 0;
 
 //comms side stuff
@@ -93,7 +98,7 @@ static Leg legs[LEG_COUNT] = {
 	Leg(REAR_LEFT, 6, 7, 8, 4 * LEG_MOUNTING_ANGLE, Point(-60, -104, 0), cmdpos),
 	Leg(REAR_RIGHT, 9, 10, 11, 5 * LEG_MOUNTING_ANGLE, Point(60, -104, 0), cmdpos),
 	Leg(MIDDLE_RIGHT, 12, 13, 14, 0 * LEG_MOUNTING_ANGLE, Point(120, 0, 0), cmdpos),
-	Leg(FRONT_RIGHT, 15, 16, 17, 1 * LEG_MOUNTING_ANGLE, Point(60, 104, 0), cmdpos)};
+	Leg(FRONT_RIGHT, 15, 17, 18, 1 * LEG_MOUNTING_ANGLE, Point(60, 104, 0), cmdpos)};
 
 void doResetLegs()
 {
@@ -143,13 +148,18 @@ void doResetLegs()
 }
 
 // 4017 servo driver things
-static uint8_t servoIndexStart_4017 = 16; // The first servo that the 4017's control
+static uint8_t servoIndexStart_4017 = 400; // The first servo that the 4017's control
 static servo4017_t servo4017Device = {
 	41.6666,
 	60,
 	0,
 	{0, 0, 0, 0, 0, 0, 0, 0, 0},
 };
+
+// Serial servo driver things
+static const uint8_t servoIndexStart_serial = 16;
+
+
 
 // ----------Microcontroller things--------
 static void clock_setup(void)
@@ -162,19 +172,24 @@ static void clock_setup(void)
 	rcc_periph_clock_enable(RCC_GPIOA);
 
 	// Enable clocks for GPIO port A (for GPIO_USART2_TX) and USART2.
+	rcc_periph_clock_enable(RCC_GPIOA);
 	rcc_periph_clock_enable(RCC_USART2);
 	rcc_periph_clock_enable(RCC_AFIO);
 
 	rcc_periph_clock_enable(RCC_GPIOB);
 	//I2C
 	rcc_periph_clock_enable(RCC_I2C2);
+
+	// Enable clocks for USART1 on PA9/PA10
+	rcc_periph_clock_enable(RCC_GPIOA);
+	rcc_periph_clock_enable(RCC_USART1);
+	rcc_periph_clock_enable(RCC_AFIO);
 }
 
 static void usart_setup(void)
 {
-	rcc_periph_clock_enable(RCC_GPIOA);
-	rcc_periph_clock_enable(RCC_USART2);
 
+	// USART 2 on PA2, PA3
 	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO2); //USART 2 TX is A2
 	gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO3);					  //USART 2 RX is A3
 
@@ -188,6 +203,25 @@ static void usart_setup(void)
 	USART_CR1(USART2) |= USART_CR1_RXNEIE;
 
 	usart_enable(USART2);
+
+	// USART 1 on PA9, PA10
+	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO9); //USART 1 TX is A9
+	gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, GPIO10);					  //USART 1 RX is A10
+
+	usart_set_baudrate(USART1, 9600);
+	usart_set_databits(USART1, 8);
+	usart_set_stopbits(USART1, USART_STOPBITS_1);
+	usart_set_parity(USART1, USART_PARITY_NONE);
+	usart_set_mode(USART1, USART_MODE_TX_RX);
+	usart_set_flow_control(USART1, USART_FLOWCONTROL_NONE);
+	//enable interrupt rx
+	//USART_CR1(USART1) |= USART_CR1_RXNEIE;
+
+	usart_enable(USART1);
+
+
+
+
 }
 
 static void nvic_setup(void)
@@ -256,7 +290,7 @@ int main(void)
 
 	clock_setup();
 	gpio_setup();
-	//timer_setup();
+	timer_setup();
 	usart_setup();
 	//i2cMaster_setup(I2C2);
 	nvic_setup();
@@ -264,6 +298,8 @@ int main(void)
 	//pca9685_setup(I2C2, 0x80);
 
 	servo4017_setup(&servo4017Device);
+
+	serialServo_setup(USART1);
 
 	// Manually centre the legs
 	for (int i = 0; i < NUMSERVOS; i++)
@@ -637,17 +673,18 @@ void tim2_isr(void)
 			for (uint8_t servoIdx = 0; servoIdx < NUMSERVOS; servoIdx++)
 			{
 
-				// Currently only support 16 sevos - easier to just make it work this way rather than modifying the demand code
-				if (_cmdpos[servoIdx] != cmdpos[servoIdx])
+				if (1)//(_cmdpos[servoIdx] != cmdpos[servoIdx])
 				{
 					_cmdpos[servoIdx] = cmdpos[servoIdx];
-					if (servoIdx < 16)
-					{
+
+					if( servoIdx >= servoIndexStart_serial){
+						if(servoIdx >= servoIndexStart_4017){
+							//timerCompareValue_4017[servoIdx - servoIndexStart_4017] = cmdpos[servoIdx];
+						} else {
+							serialServo_setServoPos(USART1, servoIdx-servoIndexStart_serial, cmdpos[servoIdx]);
+						}
+					} else {
 						//pca9685_setServoPos(I2C2, 0x80, servoIdx, _cmdpos[servoIdx]);
-					}
-					else
-					{
-						//timerCompareValue_4017[servoIdx - servoIndexStart_4017] = cmdpos[servoIdx];
 					}
 				}
 			}
