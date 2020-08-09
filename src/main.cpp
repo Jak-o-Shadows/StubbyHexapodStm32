@@ -261,7 +261,7 @@ int main(void)
 	//i2cMaster_setup(I2C2);
 	nvic_setup();
 
-	//pca965_setup(I2C2, 0x80);
+	//pca9685_setup(I2C2, 0x80);
 
 	servo4017_setup(&servo4017Device);
 

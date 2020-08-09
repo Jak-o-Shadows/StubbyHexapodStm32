@@ -1,6 +1,6 @@
 #include "pca9685/pca9685.h"
 
-void pca965_setup(uint32_t i2c, uint8_t address)
+void pca9685_setup(uint32_t i2c, uint8_t address)
 {
     uint8_t addressShifted = address >> 1; //loc3 bitshifts for us
 
